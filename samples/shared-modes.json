@@ -1,0 +1,25 @@
+{
+  "batch_id": "B-shared",
+  "sealed_count": 1,
+  "allocations": [{"station_id": "A", "capacity": 1}, {"station_id": "B", "capacity": 1}],
+  "modes": [{"name": "standard", "prior": "1/2"}, {"name": "backup", "prior": "1/2"}],
+  "trials": {
+    "A": [{"trial_id": "a-1", "mode_weights": [
+      {"mode": "standard", "normal": 1, "defect": 9},
+      {"mode": "backup", "normal": 1, "defect": 1}
+    ]}],
+    "B": [{"trial_id": "b-1", "mode_weights": [
+      {"mode": "standard", "normal": 9, "defect": 1},
+      {"mode": "backup", "normal": 1, "defect": 9}
+    ]}]
+  },
+  "thresholds": [{"station_id": "A", "minimum": 1}, {"station_id": "B", "minimum": 1}],
+  "expected": {"probabilities": ["41/46", "5/46", "0"], "mode_posterior": ["41/46", "5/46"]},
+  "correction": {
+    "trials": [{"trial_id": "a-1", "mode_weights": [
+      {"mode": "standard", "normal": 2, "defect": 18},
+      {"mode": "backup", "normal": 1, "defect": 1}
+    ]}],
+    "expected": {"probabilities": ["163/174", "11/174", "0"], "mode_posterior": ["82/87", "5/87"]}
+  }
+}
