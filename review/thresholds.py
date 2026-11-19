@@ -1,9 +1,13 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 from fractions import Fraction
+from typing import TYPE_CHECKING
 
 from receipt.selection import SelectedPieces
 from review.distribution import iter_weighted_counts
+
+if TYPE_CHECKING:
+    from review.modes import ModeSelection
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,7 +27,7 @@ class RiskProbabilities:
 
 
 def validate_thresholds(
-    selection: SelectedPieces, thresholds: Iterable[Threshold]
+    selection: 'SelectedPieces | ModeSelection', thresholds: Iterable[Threshold]
 ) -> tuple[Threshold, Threshold]:
     try:
         queries = tuple(thresholds)

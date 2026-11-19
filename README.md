@@ -26,6 +26,12 @@ python3 -B -m review.cli demo
 | `reveal` | `CENTER BATCH` | `defect_count` |
 | `publish` | `CENTER BATCH RECEIPT_IDS_JSON THRESHOLDS_JSON` | `report` 和 `receipt` |
 | `fetch` | `CENTER REPORT_ID` | 按号领取的 `report` 和 `receipt` |
+| `register-modes` | `CENTER BATCH ALLOCATIONS_JSON K MODES_JSON` | 可发往站端的模式清册 |
+| `freeze-modes` | `SITE MANIFEST_JSON STATION TRIALS_JSON` | `revision_id` |
+| `issue-modes` | `SITE REVISION_ID` | 固定 V2 模式站件 |
+| `receive-modes` | `CENTER BATCH PIECE_JSON` | `receipt_id` |
+| `publish-modes` | `CENTER BATCH RECEIPT_IDS_JSON THRESHOLDS_JSON` | 模式 `report` 和 `receipt` |
+| `fetch-modes` | `CENTER REPORT_ID` | 按号领取的模式 `report` 和 `receipt` |
 
 `CENTER` 与每个 `SITE` 是不同 SQLite 文件。各命令幂等初始化自己使用的表。清册的 `allocations` 是由 `station_id` 与 `capacity` 对象组成的数组。`TRIALS_JSON` 是由 `trial_id`、`normal`、`defect` 对象组成的数组。权重可用 JSON 整数或有理数字符串，浮点 JSON 数值会被拒绝。`RECEIPT_IDS_JSON` 是正整数数组。`THRESHOLDS_JSON` 是两个 `station_id`、`minimum` 对象组成的有序数组。`samples/` 中有普通工作输入、手算核对输入和独立 V1 站件。
 
@@ -39,6 +45,8 @@ python3 -B -m review.cli demo
 - `receipt.intake.receive(campaign, receipts, batch_id, envelope)` 返回中心接纳号。`read_accepted_piece(receipts, receipt_id)` 读回已解码站件和首次接纳原文。`receipt.selection.select_pieces(receipts, manifest, receipt_ids)` 按原顺序确定完整选件。
 - `campaign.reveal.reveal(campaign, batch_id)` 返回固定总数并持久标记揭晓。`require_revealed_count(campaign, batch_id)` 读取已揭晓值。
 - `review.publication.publish(campaign, receipts, reports, batch_id, receipt_ids, thresholds)` 以两个 `review.thresholds.Threshold` 发起签发。`review.readback.fetch(reports, report_id)` 领取。两者返回 `(PublishedReport, PublicationReceipt)`。
+- `campaign.manifest.register_modes(campaign, batch_id, allocations, sealed_count, modes)` 返回模式清册 `dict`；`read_mode_manifest` 读取同一投影。`observations.revision.freeze_modes(observations, manifest, station_id, rows)` 返回本站修订号，`read_frozen_mode_revision` 按号读回。`station.issuance.issue_modes(observations, station, revision_id)` 返回 V2 站件原文，重复发行返回原文。
+- `receipt.intake.receive_modes(campaign, receipts, batch_id, envelope)` 返回中心接纳号；`read_mode_envelope(receipts, receipt_id)` 返回首次接纳原文，`read_accepted_mode_piece` 返回解码件。`review.publication.publish_modes(...)` 与 `review.readback.fetch_modes(reports, report_id)` 分别签发和按号领取模式报告与回执。
 
 无效输入、冲突、未揭晓及证据不相容抛出 `ValueError`，未知批号、修订号、接纳号或报告号抛出 `LookupError`。SQLite 写入或提交错误向调用方传播。重复登记比较站额及密封总数并保留原揭晓状态。重复接纳按批号、站号与发行号识别同身份件，并按解析后的精确内容比较。
 
@@ -49,3 +57,14 @@ python3 -B -m review.cli demo
 每项权重是该计数下全部本站缺陷分配的证据权重之和。每片的正常和缺陷权重分别乘入相应分配。向量整体乘同一正因子只改变共同尺度。给定全批 K，所有大小为 K 的子集先验等可能。中心对所有站件的计数权重相乘，保留总数为 K 的组合，并在同一个分母下算第一站达标、第二站达标和共同达标。店外未查询站同样参加总数条件。门槛顺序保留，门槛零为必达，超站额的门槛事件概率为零。总相容权重为零则拒发。Python 结果用 `Fraction`，命令输出用对应字符串。
 
 报告固定保存批号、揭晓总数、原接纳号序列、有序门槛和结果。报告与成功回执在同一次提交中写入。验证失败和 SQLite 提交失败均无新增定稿和成功回执。历史领取直接读取存档。完整套件使用独立手算数值核对两种 K、离线收件、旧修订及旧报告、站额输入边界和延迟外键造成的真实提交失败。
+
+## 共享判读模式（MODE_REVIEW）
+
+普通批继续使用原来的七个命令和 V1 站件。共享模式批使用 `*-modes` 系列命令与版本 `2` 站件，两种批号共用同一编号空间。
+
+- 配样：`MODES_JSON` 是非空有序数组，每项为 `{"name": ..., "prior": "分子/正分母"}`。模式名非空互异，先验精确为正且总和恰为 `1`。清册字段仅 `batch_id`、`allocations`、`modes`，不含密封总数。
+- 站端：`TRIALS_JSON` 每行为 `{"trial_id": ..., "mode_weights": [{"mode": ..., "normal": ..., "defect": ...}, ...]}`，须对清册每个模式恰给一项，覆盖本站容量。权重为非负精确有理数；某模式下一片两项皆零即该片在该模式下质量为零。
+- V2 站件：`version` 为整数 `2`，字段为 `version`、`batch_id`、`station_id`、`capacity`、`issue_id`、`revision_id`、`modes`。`modes` 是有序数组，每项 `{"mode": ..., "count_evidence": [...]}`，长度容量加一，索引即本站缺陷片数。某计数证据是该模式下本站全部分配的权重之和，各分配乘入各片在该模式与缺陷状态下的权重。
+- 尺度约定：所有模式的所有计数权重同时乘同一正因子不改变证据含义；接纳按此判定同身份重投并保留首次原文。只放大其中一部分模式不属于同尺度，按冲突拒收。全零证据组仅与全零证据组等价，且这样的站件在这些模式下后验为零。
+- 报告：给定揭晓的 K，每个模式下所有大小为 K 的全批缺陷子集先验等可能。`mode_posterior` 为该模式先验乘全站相容证据质量再按全批条件分母归一，零质量模式后验为零，全批质量为零拒发。`probabilities` 沿用 V1 的 `RiskProbabilities`，三项都与 `mode_posterior` 使用同一分母。
+- 报告与回执同次提交，`fetch-modes` 按号读取存值。非法、未揭晓、冲突和不兼容报 `ValueError`，未知编号报 `LookupError`。`samples/shared-modes.json` 给出可手算样例，`python3 -B mode_example.py` 演示断源接纳、签发、更正与重开领取。

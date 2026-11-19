@@ -1,7 +1,8 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from campaign.allocation import StationAllocation, total_capacity, validate_allocations
+from campaign.modes import ModeManifest, check_sealed_count, make_mode_manifest
 from campaign.repository import CampaignRepository
 
 
@@ -31,12 +32,41 @@ def register(
     return Manifest(batch_id, station_rows)
 
 
+def register_modes(
+    repository: CampaignRepository,
+    batch_id: str,
+    allocations: Iterable[StationAllocation],
+    sealed_count: int,
+    modes: Iterable[Mapping[str, object]],
+) -> dict[str, object]:
+    pending = make_mode_manifest(batch_id, allocations, modes)
+    check_sealed_count(sealed_count, pending.allocations)
+    stored = repository.register_mode_batch(
+        pending.batch_id, pending.allocations, sealed_count, pending.modes
+    )
+    return stored.to_dict()
+
+
 def read_manifest(repository: CampaignRepository, batch_id: str) -> Manifest:
     _validate_batch_id(batch_id)
     allocations = repository.load_allocations(batch_id)
     if allocations is None:
         raise LookupError(f'unknown batch {batch_id!r}')
     return Manifest(batch_id, allocations)
+
+
+def read_mode_manifest(repository: CampaignRepository, batch_id: str) -> dict[str, object]:
+    return load_mode_manifest(repository, batch_id).to_dict()
+
+
+def load_mode_manifest(repository: CampaignRepository, batch_id: str) -> ModeManifest:
+    _validate_batch_id(batch_id)
+    stored = repository.load_mode_manifest(batch_id)
+    if stored is None:
+        if repository.load_allocations(batch_id) is None:
+            raise LookupError(f'unknown batch {batch_id!r}')
+        raise ValueError(f'batch {batch_id!r} is not a shared-mode batch')
+    return stored
 
 
 def _validate_batch_id(batch_id: str) -> None:

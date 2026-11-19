@@ -1,6 +1,8 @@
+from fractions import Fraction
 import sqlite3
 
 from campaign.allocation import StationAllocation
+from campaign.modes import ModeManifest, ModeSpec
 from storage import initialize_schema, write_transaction
 
 
@@ -16,6 +18,17 @@ CREATE TABLE IF NOT EXISTS campaign_allocations (
     capacity TEXT NOT NULL,
     PRIMARY KEY (batch_id, station_id)
 );
+CREATE TABLE IF NOT EXISTS campaign_mode_sets (
+    batch_id TEXT PRIMARY KEY NOT NULL REFERENCES campaign_batches(batch_id)
+);
+CREATE TABLE IF NOT EXISTS campaign_modes (
+    batch_id TEXT NOT NULL REFERENCES campaign_mode_sets(batch_id),
+    ordinal INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    prior TEXT NOT NULL,
+    PRIMARY KEY (batch_id, ordinal),
+    UNIQUE (batch_id, name)
+);
 '''
 
 
@@ -30,6 +43,10 @@ class CampaignRepository:
         self, batch_id: str, allocations: tuple[StationAllocation, ...], sealed_count: int
     ) -> None:
         with write_transaction(self.connection):
+            if self.connection.execute(
+                'SELECT 1 FROM campaign_mode_sets WHERE batch_id = ?', (batch_id,)
+            ).fetchone() is not None:
+                raise ValueError(f'batch {batch_id!r} is registered as a shared-mode batch')
             existing = self.connection.execute(
                 'SELECT sealed_count FROM campaign_batches WHERE batch_id = ?', (batch_id,)
             ).fetchone()
@@ -46,6 +63,68 @@ class CampaignRepository:
                 'INSERT INTO campaign_allocations (batch_id, station_id, capacity) VALUES (?, ?, ?)',
                 ((batch_id, row.station_id, str(row.capacity)) for row in allocations),
             )
+
+    def register_mode_batch(
+        self,
+        batch_id: str,
+        allocations: tuple[StationAllocation, ...],
+        sealed_count: int,
+        modes: tuple[ModeSpec, ...],
+    ) -> ModeManifest:
+        with write_transaction(self.connection):
+            existing = self.connection.execute(
+                'SELECT sealed_count FROM campaign_batches WHERE batch_id = ?', (batch_id,)
+            ).fetchone()
+            if existing is not None:
+                stored_modes = self.load_modes(batch_id)
+                if (
+                    stored_modes is None
+                    or int(existing[0]) != sealed_count
+                    or self.load_allocations(batch_id) != allocations
+                    or stored_modes != modes
+                ):
+                    raise ValueError(f'conflicting registration for batch {batch_id!r}')
+                return ModeManifest(batch_id, allocations, modes)
+
+            self.connection.execute(
+                'INSERT INTO campaign_batches (batch_id, sealed_count) VALUES (?, ?)',
+                (batch_id, str(sealed_count)),
+            )
+            self.connection.executemany(
+                'INSERT INTO campaign_allocations (batch_id, station_id, capacity) VALUES (?, ?, ?)',
+                ((batch_id, row.station_id, str(row.capacity)) for row in allocations),
+            )
+            self.connection.execute(
+                'INSERT INTO campaign_mode_sets (batch_id) VALUES (?)', (batch_id,)
+            )
+            self.connection.executemany(
+                'INSERT INTO campaign_modes (batch_id, ordinal, name, prior) VALUES (?, ?, ?, ?)',
+                (
+                    (batch_id, index, mode.name, str(mode.prior))
+                    for index, mode in enumerate(modes)
+                ),
+            )
+        return ModeManifest(batch_id, allocations, modes)
+
+    def load_modes(self, batch_id: str) -> tuple[ModeSpec, ...] | None:
+        if self.connection.execute(
+            'SELECT 1 FROM campaign_mode_sets WHERE batch_id = ?', (batch_id,)
+        ).fetchone() is None:
+            return None
+        rows = self.connection.execute(
+            'SELECT name, prior FROM campaign_modes WHERE batch_id = ? ORDER BY ordinal',
+            (batch_id,),
+        ).fetchall()
+        return tuple(ModeSpec(name, Fraction(prior)) for name, prior in rows)
+
+    def load_mode_manifest(self, batch_id: str) -> ModeManifest | None:
+        modes = self.load_modes(batch_id)
+        if modes is None:
+            return None
+        allocations = self.load_allocations(batch_id)
+        if allocations is None:
+            return None
+        return ModeManifest(batch_id, allocations, modes)
 
     def load_allocations(self, batch_id: str) -> tuple[StationAllocation, ...] | None:
         rows = self.connection.execute(

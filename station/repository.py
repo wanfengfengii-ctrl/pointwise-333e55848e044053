@@ -9,6 +9,11 @@ CREATE TABLE IF NOT EXISTS issued_pieces (
     issue_id TEXT NOT NULL UNIQUE,
     envelope TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS issued_mode_pieces (
+    revision_id INTEGER PRIMARY KEY REFERENCES frozen_mode_revisions(revision_id),
+    issue_id TEXT NOT NULL UNIQUE,
+    envelope TEXT NOT NULL
+);
 '''
 
 
@@ -32,6 +37,23 @@ class StationRepository:
                 return existing
             self.connection.execute(
                 'INSERT INTO issued_pieces (revision_id, issue_id, envelope) VALUES (?, ?, ?)',
+                (revision_id, issue_id, envelope),
+            )
+        return envelope
+
+    def get_mode_by_revision(self, revision_id: int) -> str | None:
+        row = self.connection.execute(
+            'SELECT envelope FROM issued_mode_pieces WHERE revision_id = ?', (revision_id,)
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def save_issued_mode(self, revision_id: int, issue_id: str, envelope: str) -> str:
+        with write_transaction(self.connection):
+            existing = self.get_mode_by_revision(revision_id)
+            if existing is not None:
+                return existing
+            self.connection.execute(
+                'INSERT INTO issued_mode_pieces (revision_id, issue_id, envelope) VALUES (?, ?, ?)',
                 (revision_id, issue_id, envelope),
             )
         return envelope

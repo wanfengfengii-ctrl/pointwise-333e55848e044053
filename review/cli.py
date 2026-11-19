@@ -10,18 +10,19 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from campaign.allocation import StationAllocation, validate_allocations
-from campaign.manifest import Manifest, register
+from campaign.manifest import Manifest, register, register_modes
+from campaign.modes import parse_mode_manifest
 from campaign.repository import CampaignRepository
 from campaign.reveal import reveal
 from observations.repository import ObservationRepository
-from observations.revision import freeze
-from receipt.intake import receive
+from observations.revision import freeze, freeze_modes
+from receipt.intake import receive, receive_modes
 from receipt.repository import ReceiptRepository
-from review.publication import publish
-from review.readback import fetch
+from review.publication import publish, publish_modes
+from review.readback import fetch, fetch_modes
 from review.repository import ReportRepository
 from review.thresholds import Threshold
-from station.issuance import issue
+from station.issuance import issue, issue_modes
 from station.repository import StationRepository
 from storage import open_database
 
@@ -134,8 +135,101 @@ def _fetch(args: argparse.Namespace) -> None:
         _emit({'report': report, 'receipt': receipt})
 
 
+def _mode_manifest(value: object):
+    return parse_mode_manifest(value)
+
+
+def _register_modes(args: argparse.Namespace) -> None:
+    allocations = _allocations(_load(args.allocations))
+    modes = _array(_load(args.modes), 'modes')
+    with _center(args.center) as (campaign, _, _):
+        _emit(register_modes(campaign, args.batch, allocations, args.sealed_count, modes))
+
+
+def _freeze_modes(args: argparse.Namespace) -> None:
+    manifest = _mode_manifest(_load(args.manifest))
+    rows = _array(_load(args.trials), 'trials')
+    with _site(args.site) as (observations, _):
+        revision_id = freeze_modes(observations, manifest, args.station, rows)
+        _emit({'revision_id': revision_id})
+
+
+def _issue_modes(args: argparse.Namespace) -> None:
+    with _site(args.site) as (observations, station):
+        print(issue_modes(observations, station, args.revision_id))
+
+
+def _receive_modes(args: argparse.Namespace) -> None:
+    envelope = args.piece.read_text(encoding='utf-8')
+    with _center(args.center) as (campaign, receipts, _):
+        receipt_id = receive_modes(campaign, receipts, args.batch, envelope)
+        _emit({'receipt_id': receipt_id})
+
+
+def _publish_modes(args: argparse.Namespace) -> None:
+    receipt_ids = _array(_load(args.receipt_ids), 'receipt_ids')
+    thresholds = _thresholds(_load(args.thresholds))
+    with _center(args.center) as (campaign, receipts, reports):
+        report, receipt = publish_modes(campaign, receipts, reports, args.batch, receipt_ids, thresholds)
+        _emit({'report': report, 'receipt': receipt})
+
+
+def _fetch_modes(args: argparse.Namespace) -> None:
+    with _center(args.center) as (_, _, reports):
+        report, receipt = fetch_modes(reports, args.report_id)
+        _emit({'report': report, 'receipt': receipt})
+
+
+def _mode_demo_result(root: Path, fixture: dict) -> dict:
+    batch_id = fixture['batch_id']
+    center_path = root / 'mode-center.sqlite'
+    allocations = _allocations(fixture['allocations'])
+    with _center(center_path) as (campaign, receipts, reports):
+        manifest = register_modes(
+            campaign, batch_id, allocations, fixture['sealed_count'], fixture['modes']
+        )
+        envelopes = {}
+        for allocation in manifest['allocations']:
+            station_id = allocation['station_id']
+            site_path = root / f'mode-site-{station_id}.sqlite'
+            with _site(site_path) as (observations, station):
+                revision_id = freeze_modes(observations, manifest, station_id, fixture['trials'][station_id])
+                envelopes[station_id] = issue_modes(observations, station, revision_id)
+            site_path.unlink()
+        ids = {
+            station_id: receive_modes(campaign, receipts, batch_id, envelope)
+            for station_id, envelope in envelopes.items()
+        }
+        reveal(campaign, batch_id)
+        first, first_receipt = publish_modes(
+            campaign, receipts, reports, batch_id,
+            (ids['B'], ids['A']), _thresholds(fixture['thresholds']),
+        )
+        with _site(root / 'mode-site-A.sqlite') as (observations, station):
+            revised = freeze_modes(observations, manifest, 'A', fixture['correction']['trials'])
+            amended_envelope = issue_modes(observations, station, revised)
+        (root / 'mode-site-A.sqlite').unlink()
+        new_id = receive_modes(campaign, receipts, batch_id, amended_envelope)
+        second, second_receipt = publish_modes(
+            campaign, receipts, reports, batch_id,
+            (ids['B'], new_id), _thresholds(fixture['thresholds']),
+        )
+    with _center(center_path) as (_, _, reports):
+        reopened, reopened_receipt = fetch_modes(reports, first.report_id)
+    if (reopened, reopened_receipt) != (first, first_receipt):
+        raise ValueError('reopened center returned a different shared-mode publication')
+    return {
+        'reopened': {
+            'report': reopened,
+            'receipt': reopened_receipt,
+        },
+        'corrected': {'report': second, 'receipt': second_receipt},
+    }
+
+
 def _demo(_: argparse.Namespace) -> None:
     fixture = _load(_ROOT / 'samples' / 'demo.json')
+    mode_fixture = _load(_ROOT / 'samples' / 'shared-modes.json')
     with TemporaryDirectory(prefix='blind-review-') as directory:
         root = Path(directory)
         center_path = root / 'center.sqlite'
@@ -161,7 +255,8 @@ def _demo(_: argparse.Namespace) -> None:
             original, original_receipt = fetch(reports, report.report_id)
         if (original, original_receipt) != (report, receipt):
             raise ValueError('reopened center returned a different publication')
-        _emit({'report': original, 'receipt': original_receipt})
+        modes = _mode_demo_result(root, mode_fixture)
+        _emit({'report': original, 'receipt': original_receipt, 'modes': modes})
 
 
 def _verify(_: argparse.Namespace) -> int:
@@ -181,6 +276,12 @@ def _parser() -> argparse.ArgumentParser:
         ('reveal', _reveal, 'Reveal the registered defect count', (('center', Path), ('batch', str))),
         ('publish', _publish, 'Publish an ordered two-station report', (('center', Path), ('batch', str), ('receipt_ids', Path), ('thresholds', Path))),
         ('fetch', _fetch, 'Read the original report and receipt', (('center', Path), ('report_id', int))),
+        ('register-modes', _register_modes, 'Register a shared-mode batch', (('center', Path), ('batch', str), ('allocations', Path), ('sealed_count', int), ('modes', Path))),
+        ('freeze-modes', _freeze_modes, 'Freeze per-mode evidence in the site database', (('site', Path), ('manifest', Path), ('station', str), ('trials', Path))),
+        ('issue-modes', _issue_modes, 'Issue the fixed shared-mode envelope', (('site', Path), ('revision_id', int))),
+        ('receive-modes', _receive_modes, 'Accept an offline shared-mode envelope', (('center', Path), ('batch', str), ('piece', Path))),
+        ('publish-modes', _publish_modes, 'Publish an ordered shared-mode report', (('center', Path), ('batch', str), ('receipt_ids', Path), ('thresholds', Path))),
+        ('fetch-modes', _fetch_modes, 'Read the original shared-mode report and receipt', (('center', Path), ('report_id', int))),
         ('demo', _demo, 'Run the local offline workflow', ()),
         ('verify', _verify, 'Run the complete unittest suite', ()),
     )

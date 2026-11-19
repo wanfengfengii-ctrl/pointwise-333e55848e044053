@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from campaign.manifest import Manifest
 from observations.coverage import validate_coverage
 from observations.intake import TrialEvidence, parse_trials
+from observations.modes import (
+    FrozenModeRevision,
+    freeze_modes,
+    read_frozen_mode_revision,
+)
 from observations.repository import ObservationRepository
 
 
@@ -36,3 +41,13 @@ def read_frozen_revision(repository: ObservationRepository, revision_id: int) ->
     if stored is None:
         raise LookupError(f'unknown revision {revision_id}')
     return FrozenRevision(revision_id, *stored)
+
+
+__all__ = [
+    'FrozenRevision',
+    'FrozenModeRevision',
+    'freeze',
+    'freeze_modes',
+    'read_frozen_revision',
+    'read_frozen_mode_revision',
+]

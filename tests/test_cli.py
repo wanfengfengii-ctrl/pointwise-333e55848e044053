@@ -70,3 +70,56 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result['report']['probabilities'], {'first': '1/2', 'second': '1/2', 'joint': '0'})
         self.assertEqual(len(result['report']['receipt_ids']), 2)
         self.assertEqual(result['receipt']['report_id'], result['report']['report_id'])
+        modes = result['modes']
+        self.assertEqual(modes['reopened']['report']['probabilities'], {'first': '41/46', 'second': '5/46', 'joint': '0'})
+        self.assertEqual(modes['reopened']['report']['mode_posterior'], ['41/46', '5/46'])
+        self.assertEqual(modes['corrected']['report']['probabilities'], {'first': '163/174', 'second': '11/174', 'joint': '0'})
+        self.assertEqual(modes['corrected']['report']['mode_posterior'], ['82/87', '5/87'])
+
+    def test_six_mode_commands(self):
+        fixture = load_sample('shared-modes.json')
+        batch_id = fixture['batch_id']
+        with TemporaryDirectory(prefix='blind-review-mode-cli-') as directory:
+            root = Path(directory)
+            center = root / 'center.sqlite'
+            allocations = self.write_json(root / 'allocations.json', fixture['allocations'])
+            modes = self.write_json(root / 'modes.json', fixture['modes'])
+            registered = self.run_cli(
+                'register-modes', center, batch_id, allocations, fixture['sealed_count'], modes
+            )
+            self.assertEqual(registered, {
+                'batch_id': batch_id,
+                'allocations': fixture['allocations'],
+                'modes': fixture['modes'],
+            })
+            manifest = self.write_json(root / 'manifest.json', registered)
+            pieces = {}
+            for row in fixture['allocations']:
+                station_id = row['station_id']
+                site = root / f'{station_id}.sqlite'
+                trials = self.write_json(root / f'{station_id}-trials.json', fixture['trials'][station_id])
+                frozen = self.run_cli('freeze-modes', site, manifest, station_id, trials)
+                envelope = self.run_cli('issue-modes', site, frozen['revision_id'])
+                self.assertEqual(envelope['version'], 2)
+                pieces[station_id] = self.write_json(root / f'{station_id}-piece.json', envelope)
+                site.unlink()
+            ids = {
+                station_id: self.run_cli('receive-modes', center, batch_id, piece)['receipt_id']
+                for station_id, piece in pieces.items()
+            }
+            self.assertEqual(self.run_cli('reveal', center, batch_id), {'defect_count': 1})
+            receipts = self.write_json(root / 'mode-receipts.json', [ids['B'], ids['A']])
+            thresholds = self.write_json(root / 'mode-thresholds.json', fixture['thresholds'])
+            publication = self.run_cli('publish-modes', center, batch_id, receipts, thresholds)
+            report = publication['report']
+            self.assertEqual(report['receipt_ids'], [ids['B'], ids['A']])
+            self.assertEqual(report['manifest'], registered)
+            self.assertEqual(report['probabilities'], {'first': '41/46', 'second': '5/46', 'joint': '0'})
+            self.assertEqual(report['mode_posterior'], ['41/46', '5/46'])
+            self.assertEqual(self.run_cli('fetch-modes', center, report['report_id']), publication)
+            self.assertIn('unknown report', self.run_cli('fetch-modes', center, 999, succeeds=False))
+            v1_receipts = self.write_json(root / 'v1-receipts.json', list(ids.values()))
+            self.assertIn(
+                'is a shared-mode batch',
+                self.run_cli('publish', center, batch_id, v1_receipts, thresholds, succeeds=False),
+            )
